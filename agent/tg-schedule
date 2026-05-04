@@ -85,7 +85,8 @@ done
 src_chat_id="${TG_CHAT_ID:-}"
 src_thread_id="${TG_THREAD_ID:-0}"
 if [ -z "$src_chat_id" ]; then
-  src_chat_id="$(awk 'NF{print; exit}' /etc/bux/tg-allowed.txt 2>/dev/null || true)"
+  state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+  src_chat_id="$(awk 'NF{print; exit}' "$state_home/bux/tg-allowed.txt" 2>/dev/null || true)"
 fi
 [ -n "$src_chat_id" ] || {
   echo "tg-schedule: no chat_id (set TG_CHAT_ID, or run after /start)" >&2

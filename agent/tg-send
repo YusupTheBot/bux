@@ -12,8 +12,10 @@
 #   TG_LINK_PREVIEW=1 — opt back in to TG link previews (default: suppressed)
 set -euo pipefail
 
-env_file=/etc/bux/tg.env
-allow_file=/etc/bux/tg-allowed.txt
+config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+env_file="$config_home/bux/tg.env"
+allow_file="$state_home/bux/tg-allowed.txt"
 [ -r "$env_file" ] || { echo "tg-send: cannot read $env_file" >&2; exit 1; }
 [ -r "$allow_file" ] || { echo "tg-send: no bound chat (run /start in TG first)" >&2; exit 1; }
 # shellcheck disable=SC1090

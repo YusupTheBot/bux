@@ -31,7 +31,8 @@ import uuid
 from pathlib import Path
 from urllib import request as _req
 
-STATE_DIR = Path("/tmp/tg-approvals")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from user_paths import APPROVALS_DIR as STATE_DIR, TG_ENV  # noqa: E402
 TIMEOUT_SEC = int(os.environ.get("TG_APPROVE_TIMEOUT", "600"))
 POLL_SEC = 0.5
 TG_API = "https://api.telegram.org/bot{token}/{method}"
@@ -39,10 +40,10 @@ TG_API = "https://api.telegram.org/bot{token}/{method}"
 
 def _read_bot_token() -> str:
     """Pull TG_BOT_TOKEN from /etc/bux/tg.env (KEY=VAL lines)."""
-    for line in Path("/etc/bux/tg.env").read_text().splitlines():
+    for line in TG_ENV.read_text().splitlines():
         if line.startswith("TG_BOT_TOKEN="):
             return line.split("=", 1)[1].strip().strip('"').strip("'")
-    raise RuntimeError("TG_BOT_TOKEN not found in /etc/bux/tg.env")
+    raise RuntimeError(f"TG_BOT_TOKEN not found in {TG_ENV}")
 
 
 def _tg_call(token: str, method: str, payload: dict) -> dict:

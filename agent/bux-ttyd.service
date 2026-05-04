@@ -4,12 +4,10 @@ After=network-online.target
 
 [Service]
 Type=simple
-User=bux
-Group=bux
-Environment=PATH=/home/bux/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/local/bin/ttyd -i lo -p 7681 -W /usr/bin/env viberelay run -d vibe --
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/bin/ttyd -i lo -p 7681 -W /usr/bin/env viberelay run -d vibe --
 Restart=always
 RestartSec=5
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

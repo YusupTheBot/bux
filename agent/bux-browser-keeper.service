@@ -2,19 +2,15 @@
 Description=bux browser-keeper (local Chrome CDP browser)
 After=network-online.target box-agent.service
 Wants=network-online.target
-ConditionPathExists=/etc/bux/env
+ConditionPathExists=%h/.config/bux/env
 
 [Service]
 Type=simple
-User=bux
-Group=bux
-EnvironmentFile=/etc/bux/env
-WorkingDirectory=/opt/bux/agent
-ExecStart=/opt/bux/venv/bin/python /opt/bux/agent/browser_keeper.py
+EnvironmentFile=%h/.config/bux/env
+WorkingDirectory=%h/.local/share/bux/repo/agent
+ExecStart=%h/.local/share/bux/venv/bin/python %h/.local/share/bux/repo/agent/browser_keeper.py
 Restart=always
 RestartSec=10
-StandardOutput=append:/var/log/bux/keeper.log
-StandardError=append:/var/log/bux/keeper.log
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

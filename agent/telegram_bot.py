@@ -63,41 +63,29 @@ from pathlib import Path
 
 import httpx
 
+from user_paths import (
+    ALLOWED_FILE,
+    BOX_ENV,
+    BROWSER_ENV,
+    INBOX_DIR,
+    LAST_ANNOUNCED_SHA,
+    LEGACY_SESSION_FILE,
+    LOCAL_BIN,
+    NPM_GLOBAL_BIN,
+    OPENAI_ENV,
+    QUEUE_FILE,
+    REPO_DIR,
+    SESSIONS_DIR,
+    STATE_FILE,
+    TG_ENV,
+    UPDATE_REQUEST_LANES,
+    USER,
+    WORKSPACE,
+    claude_project_dir,
+)
+
 LOG = logging.getLogger("bux-tg")
-
-TG_ENV = Path("/etc/bux/tg.env")
-BOX_ENV = Path("/etc/bux/env")
-BROWSER_ENV = Path("/home/bux/.claude/browser.env")
-OPENAI_ENV = Path("/home/bux/.secrets/openai.env")
-ALLOWED_FILE = Path("/etc/bux/tg-allowed.txt")
-STATE_FILE = Path("/etc/bux/tg-state.json")
-QUEUE_FILE = Path("/etc/bux/tg-queue.json")
-
-# Marker for "I've already told the user about this SHA". Lets transient
-# bux-tg restarts (systemd flaps, polling backoff) stay silent while
-# update-driven restarts (different SHA) announce themselves once.
-LAST_ANNOUNCED_SHA = Path("/var/lib/bux/last-announced.sha")
-
-# One-shot file written by /update before it kicks off bootstrap.sh. The next
-# time the bot starts, _announce_online_if_new_sha reads this and unconditionally
-# pings the listed lane(s) with a "back online" confirmation — even if the SHA
-# didn't change and even if the lane was idle. The user explicitly asked for the
-# restart, so they get a confirmation.  Format: one "<chat_id>\t<thread_id>" per
-# line (thread_id may be empty). Consumed (deleted) after read.
-UPDATE_REQUEST_LANES = Path("/var/lib/bux/update-request.lanes")
-
-# Per-lane session-uuid root. Bot creates lazily as bux-owned.
-SESSIONS_DIR = Path("/home/bux/.bux/sessions")
-# Pre-lane "global" session, written by the legacy bot. We migrate this into
-# the (chat_id, main) lane for the first chat that messages after upgrade so
-# existing single-chat users keep their conversation history.
-LEGACY_SESSION_FILE = Path("/home/bux/.bux/session")
-# All lanes share this cwd. Per-lane isolation is via session UUID only —
-# claude --resume <uuid> writes its transcript to
-# ~/.claude/projects/-home-bux/<uuid>.jsonl, so different UUIDs in the same
-# project dir give independent conversations without separate workspaces.
-WORKSPACE = Path("/home/bux")
-VIBERELAY_BIN = os.environ.get("VIBERELAY_BIN") or shutil.which("viberelay") or "/home/bux/.local/bin/viberelay"
+VIBERELAY_BIN = os.environ.get("VIBERELAY_BIN") or shutil.which("viberelay") or str(LOCAL_BIN / "viberelay")
 
 
 def _claude_cli(*args: str) -> list[str]:
@@ -1119,7 +1107,7 @@ def _claude_session_flag(sid: str) -> list[str]:
     is /home/bux, encoded as `-home-bux`). Existing transcript → resume; no
     transcript → create.
     """
-    transcript = Path("/home/bux/.claude/projects/-home-bux") / f"{sid}.jsonl"
+    transcript = claude_project_dir(WORKSPACE) / f"{sid}.jsonl"
     return ["--resume", sid] if transcript.exists() else ["--session-id", sid]
 
 
@@ -1625,16 +1613,12 @@ class ShellSession:
         except Exception:
             pass
 
-        # Persistent bash as the bux user with login env so `npm`, `codex`,
-        # `gh`, etc. find their config and creds. `sudo -iu bux -- bash -i`
-        # mirrors what the user gets from `sudo -iu bux` on ttyd / ssh.
+        # Persistent bash in the current logged-in user's login env so
+        # `npm`, `codex`, `gh`, etc. find their config and creds.
         # Force a minimal PS1 so we don't spam the lane with multi-line
         # color prompts on every command — the bash itself still echoes
         # input and prints output, which is the part that matters.
-        argv = [
-            "sudo", "-iu", "bux", "--",
-            "bash", "-i",
-        ]
+        argv = ["bash", "-i"]
 
         def _make_session_leader() -> None:
             # Run in the child between fork() and exec(): start a new
@@ -2026,7 +2010,7 @@ class _GhProvider:
             # where claude (which runs as bux) will look. Running as root
             # would read /root/.config/gh which claude can't see.
             r = subprocess.run(
-                ["sudo", "-u", "bux", "-H", "gh", "auth", "status", "--hostname", "github.com"],
+                ["gh", "auth", "status", "--hostname", "github.com"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -2063,10 +2047,6 @@ class _GhProvider:
             # in --web mode but we make sure it can't block on it.
             proc = subprocess.Popen(
                 [
-                    "sudo",
-                    "-u",
-                    "bux",
-                    "-H",
                     "gh",
                     "auth",
                     "login",
@@ -2132,7 +2112,7 @@ class _GhProvider:
         # Read the token as bux so we hit the same hosts.yml we just wrote.
         try:
             tok = subprocess.run(
-                ["sudo", "-u", "bux", "-H", "gh", "auth", "token", "--hostname", "github.com"],
+                ["gh", "auth", "token", "--hostname", "github.com"],
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -2149,7 +2129,7 @@ class _GhProvider:
             # Run as bux for consistency with login/check — logs out the
             # bux user's gh, not root's.
             subprocess.run(
-                ["sudo", "-u", "bux", "-H", "gh", "auth", "logout", "--hostname", "github.com"],
+                ["gh", "auth", "logout", "--hostname", "github.com"],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
@@ -2262,7 +2242,7 @@ class _CodexProvider:
     def logout(self) -> tuple[bool, str]:
         try:
             r = subprocess.run(
-                ["sudo", "-iu", "bux", "codex", "logout"],
+                ["codex", "logout"],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
@@ -2309,7 +2289,7 @@ def _set_box_env_var(key: str, value: str) -> None:
     # new env var only matters for raw git operations.
     try:
         subprocess.run(
-            ["systemctl", "restart", "box-agent.service"],
+            ["systemctl", "--user", "restart", "box-agent.service"],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=10,
@@ -2339,7 +2319,7 @@ def _unset_box_env_var(key: str) -> None:
     tmp.replace(BOX_ENV)
     try:
         subprocess.run(
-            ["systemctl", "restart", "box-agent.service"],
+            ["systemctl", "--user", "restart", "box-agent.service"],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=10,
@@ -2998,11 +2978,11 @@ class Bot:
         openai_env = _read_kv(OPENAI_ENV)
 
         env: dict[str, str] = {
-            "HOME": "/home/bux",
-            "USER": "bux",
-            # Match a typical bux login shell: per-user installs shadow system ones,
-            # then standard system bins. The bot's own PATH (root) isn't relevant.
-            "PATH": "/home/bux/.local/bin:/home/bux/.npm-global/bin:/usr/local/bin:/usr/bin:/bin",
+            "HOME": str(WORKSPACE),
+            "USER": USER,
+            # Match the current user's login shell: per-user installs shadow system ones,
+            # then standard system bins.
+            "PATH": f"{LOCAL_BIN}:{NPM_GLOBAL_BIN}:/usr/local/bin:/usr/bin:/bin",
         }
         for k in ("BU_CDP_URL", "BU_CDP_WS", "BU_BROWSER_ID", "BU_BROWSER_LIVE_URL"):
             if browser_env.get(k):
@@ -3102,7 +3082,7 @@ class Bot:
         # Claude Code 2.x split create vs. resume: `--session-id <uuid>`
         # creates and errors if the UUID already exists, `--resume <uuid>`
         # continues an existing session. Pick based on transcript presence.
-        cmd = ["sudo", "-u", "bux", "-H"] + [f"{k}={v}" for k, v in env.items() if v]
+        cmd = ["env"] + [f"{k}={v}" for k, v in env.items() if v]
         cmd += _claude_cli(
             "-p",
             *_claude_session_flag(sid),
@@ -3286,7 +3266,7 @@ class Bot:
                 # Stream produced nothing visible — fall back to a plain run so
                 # the user gets *something*. Keeps the bot honest if claude
                 # hiccuped on the streaming format.
-                fb_cmd = ["sudo", "-u", "bux", "-H"] + [f"{k}={v}" for k, v in env.items() if v]
+                fb_cmd = ["env"] + [f"{k}={v}" for k, v in env.items() if v]
                 fb_cmd += _claude_cli(
                     "-p",
                     *_claude_session_flag(sid),
@@ -3394,7 +3374,7 @@ class Bot:
                 "@openai/codex`, then sign in either way:\n"
                 "• ChatGPT subscription: send `/codex login` here, or run "
                 "`codex login --device-auth` as the bux user from a terminal.\n"
-                "• API key: drop `OPENAI_API_KEY=...` into `/home/bux/.secrets/openai.env`.\n\n"
+                f"• API key: drop `OPENAI_API_KEY=...` into `{OPENAI_ENV}`.\n\n"
                 "Pick one — if both are set, codex silently uses the API key "
                 "for billing (openai/codex#20099).\n\n"
                 "Or `/claude` to switch back.",
@@ -3409,7 +3389,7 @@ class Bot:
         # want to error out for users on that path. If neither auth is set up,
         # codex itself emits a clear stderr message which we surface below.
 
-        cmd = ["sudo", "-u", "bux", "-H"] + [f"{k}={v}" for k, v in env.items() if v]
+        cmd = ["env"] + [f"{k}={v}" for k, v in env.items() if v]
         # `-a never -s danger-full-access` is codex's equivalent of claude's
         # `--dangerously-skip-permissions`: never escalate to a human for
         # approval, and let the model run shell commands with full disk
@@ -3634,7 +3614,7 @@ class Bot:
         for p in (
             "/usr/local/bin/codex",
             "/usr/bin/codex",
-            "/home/bux/.npm-global/bin/codex",
+            str(NPM_GLOBAL_BIN / "codex"),
         ):
             if os.path.isfile(p) and os.access(p, os.X_OK):
                 return p
@@ -3823,20 +3803,16 @@ class Bot:
             LOG.exception("telegram file download failed")
             return None
 
-        inbox = "/home/bux/inbox"
+        inbox = INBOX_DIR
         try:
-            os.makedirs(inbox, exist_ok=True)
-            uid, gid = _bux_uid_gid()
-            os.chown(inbox, uid, gid)
+            inbox.mkdir(parents=True, exist_ok=True)
         except Exception:
             LOG.exception("inbox setup failed")
         fname = f"{int(time.time())}-{file_id[:12]}{suffix}"
-        path = f"{inbox}/{fname}"
+        path = str(inbox / fname)
         try:
             with open(path, "wb") as f:
                 f.write(data)
-            uid, gid = _bux_uid_gid()
-            os.chown(path, uid, gid)
             os.chmod(path, 0o644)
         except Exception:
             LOG.exception("writing %s failed", path)
@@ -4757,7 +4733,7 @@ class Bot:
         in or open the cloud admin UI. Reads straight from the cloned OSS
         repo at /opt/bux/repo.
         """
-        repo = "/opt/bux/repo"
+        repo = str(REPO_DIR)
         try:
             sha = (
                 subprocess.run(
@@ -4838,7 +4814,7 @@ class Bot:
         bootstrap.sh. The new agent comes up within ~10s and the user's next
         message lands fine.
         """
-        repo = "/opt/bux/repo"
+        repo = str(REPO_DIR)
         target = (
             (branch or "").strip()
             or subprocess.run(
@@ -5578,7 +5554,7 @@ def _announce_online_if_new_sha(bot: "Bot") -> None:
     Otherwise we stay silent across the board.
     """
     try:
-        repo = "/opt/bux/repo"
+        repo = str(REPO_DIR)
         sha = subprocess.run(
             ["git", "-C", repo, "rev-parse", "--short", "HEAD"],
             capture_output=True,

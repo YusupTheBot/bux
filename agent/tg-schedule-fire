@@ -1,4 +1,4 @@
-#!/opt/bux/venv/bin/python
+#!/usr/bin/env python3
 """Fire a scheduled agent turn. Invoked by `at` at the user's chosen time.
 
 Reads the job dir prepared by tg-schedule, optionally creates a fresh
@@ -17,14 +17,14 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-REPO_AGENT = "/opt/bux/repo/agent"
+REPO_AGENT = str(Path(__file__).resolve().parent)
 sys.path.insert(0, REPO_AGENT)
 
 import httpx  # noqa: E402
 
 from telegram_bot import Bot  # noqa: E402
 
-TG_ENV = Path("/etc/bux/tg.env")
+from user_paths import TG_ENV  # noqa: E402
 
 
 def _load_dotenv(path: Path) -> dict[str, str]:

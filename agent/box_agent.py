@@ -33,15 +33,22 @@ from pathlib import Path
 
 import websockets
 
-LOG = logging.getLogger('box-agent')
-ENV_PATH = Path('/etc/bux/env')
-HEARTBEAT_INTERVAL = 30
-TG_ENV = Path('/etc/bux/tg.env')
+from user_paths import (
+	ALLOWED_FILE,
+	BOX_ENV as ENV_PATH,
+	BROWSER_ENV as BROWSER_ENV_PATH,
+	LOCAL_BIN,
+	REPO_DIR,
+	SESSIONS_DIR,
+	STATE_FILE,
+	TG_ENV,
+	UPDATE_REQUEST_LANES,
+	USER,
+	WORKSPACE,
+)
 
-# Where the OSS repo is cloned by install.sh at bake time. /opt/bux/agent is
-# a symlink to /opt/bux/repo/agent so systemd units' ExecStart=/opt/bux/agent
-# paths resolve through the symlink. Updates run `git pull` here.
-REPO_DIR = Path('/opt/bux/repo')
+LOG = logging.getLogger('box-agent')
+HEARTBEAT_INTERVAL = 30
 
 
 def _get_agent_sha() -> str:
@@ -138,7 +145,7 @@ def _read_tg_bot_username() -> str | None:
 # shells out to `claude auth status` every 1s (first minute) or 15s (after)
 # and pushes `claude_authed` over WS the moment it flips to loggedIn.
 
-CLAUDE_BIN = os.environ.get('VIBERELAY_BIN') or shutil.which('viberelay') or '/home/bux/.local/bin/viberelay'
+CLAUDE_BIN = os.environ.get('VIBERELAY_BIN') or shutil.which('viberelay') or str(LOCAL_BIN / 'viberelay')
 
 
 def _claude_cmd(*args: str) -> list[str]:
@@ -147,7 +154,6 @@ def _claude_cmd(*args: str) -> list[str]:
 
 # Written by browser-keeper.service. Source of truth for the local browser's
 # CDP endpoint and derived browser id on the box.
-BROWSER_ENV_PATH = '/home/bux/.claude/browser.env'
 
 
 def _read_with_timeout(fd: int, max_bytes: int, timeout_seconds: float) -> bytes | None:
@@ -225,7 +231,7 @@ async def check_claude_authed() -> bool:
 			),
 			stdout=asyncio.subprocess.PIPE,
 			stderr=asyncio.subprocess.STDOUT,
-			env={**os.environ, 'HOME': '/home/bux'},
+			env={**os.environ, 'HOME': str(WORKSPACE)},
 		)
 	except Exception:
 		return False
@@ -300,18 +306,13 @@ class ShellSession:
 
 		pid, fd = pty.fork()
 		if pid == 0:
-			os.environ['HOME'] = '/home/bux'
-			os.environ['USER'] = 'bux'
+			os.environ['HOME'] = str(WORKSPACE)
+			os.environ['USER'] = USER
 			os.environ['SHELL'] = '/bin/bash'
 			os.environ['TERM'] = 'xterm-256color'
 			os.environ['LANG'] = 'C.UTF-8'
 			try:
-				os.chdir('/home/bux')
-			except Exception:
-				pass
-			try:
-				os.setgid(1001)
-				os.setuid(1001)
+				os.chdir(str(WORKSPACE))
 			except Exception:
 				pass
 			try:
@@ -595,7 +596,7 @@ class Agent:
 					),
 					stdout=asyncio.subprocess.DEVNULL,
 					stderr=asyncio.subprocess.DEVNULL,
-					env={**os.environ, 'HOME': '/home/bux'},
+					env={**os.environ, 'HOME': str(WORKSPACE)},
 				)
 				# _run_with_timeout terminates / kills the child on timeout
 				# so we never leave an orphaned `claude` subprocess holding
@@ -858,7 +859,8 @@ class Agent:
 		The session file is shared with the root-running bux-tg service, so
 		both sides use O_NOFOLLOW to be symlink-safe (see telegram_bot.py).
 		"""
-		path = '/home/bux/.bux/session'
+		SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+		path = str(SESSIONS_DIR / 'session')
 		try:
 			fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
 			try:
@@ -906,9 +908,9 @@ class Agent:
 		box_env = load_env()
 		child_env = {
 			**os.environ,
-			'HOME': '/home/bux',
-			'USER': 'bux',
-			'PATH': '/home/bux/.local/bin:/usr/local/bin:/usr/bin:/bin:' + os.environ.get('PATH', ''),
+			'HOME': str(WORKSPACE),
+			'USER': USER,
+			'PATH': f'{LOCAL_BIN}:/usr/local/bin:/usr/bin:/bin:' + os.environ.get('PATH', ''),
 		}
 		browser_env = {}
 		try:
@@ -931,7 +933,7 @@ class Agent:
 		# exclusive lock on the session file while running; a second claude
 		# against the same uuid would fail with "session in use." We flock a
 		# dedicated file so both services queue behind each other cleanly.
-		lock_path = '/home/bux/.bux/claude.lock'
+		lock_path = str(SESSIONS_DIR.parent / 'claude.lock')
 		os.makedirs(os.path.dirname(lock_path), exist_ok=True)
 		loop = asyncio.get_running_loop()
 		# O_NOFOLLOW: refuse to open through a symlink; we run as the bux user
@@ -958,7 +960,7 @@ class Agent:
 					),
 					stdout=asyncio.subprocess.PIPE,
 					stderr=asyncio.subprocess.STDOUT,
-					cwd='/home/bux',
+					cwd=str(WORKSPACE),
 					env=child_env,
 				)
 			except Exception:
@@ -1268,7 +1270,7 @@ class Agent:
 		# Runs via sudo because bootstrap.sh writes /etc/systemd/* etc.
 		# Sudoers entry is set up in bootstrap.sh itself for self-bootstrapping.
 		rc, out = _run(
-			['sudo', '/bin/bash', str(REPO_DIR / 'agent' / 'bootstrap.sh')],
+			['/bin/bash', str(REPO_DIR / 'agent' / 'bootstrap.sh')],
 			cwd='/',
 		)
 		if rc != 0:
@@ -1340,8 +1342,8 @@ class Agent:
 			return
 		# Remove any stale allow list so the new setup_token actually gates pairing.
 		for stale in (
-			Path('/etc/bux/tg-allowed.txt'),
-			Path('/etc/bux/tg-state.json'),
+			ALLOWED_FILE,
+			STATE_FILE,
 		):
 			try:
 				stale.unlink()
@@ -1358,6 +1360,7 @@ class Agent:
 		try:
 			stop_proc = await asyncio.create_subprocess_exec(
 				'systemctl',
+				'--user',
 				'stop',
 				'bux-tg.service',
 				stdout=asyncio.subprocess.DEVNULL,
@@ -1366,6 +1369,7 @@ class Agent:
 			await stop_proc.wait()
 			start_proc = await asyncio.create_subprocess_exec(
 				'systemctl',
+				'--user',
 				'start',
 				'bux-tg.service',
 				stdout=asyncio.subprocess.DEVNULL,
@@ -1460,7 +1464,7 @@ class Agent:
 			try:
 				import os as _os
 
-				_os.environ['HOME'] = '/home/bux'
+				_os.environ['HOME'] = str(WORKSPACE)
 				_os.environ['COLUMNS'] = '1000'
 				_os.environ['LINES'] = '50'
 				_os.execvp(CLAUDE_BIN, _claude_cmd('auth', 'login'))

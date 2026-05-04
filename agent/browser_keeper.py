@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """browser-keeper — maintains a long-lived local Chrome session with CDP.
 
-Writes /home/bux/.claude/browser.env (mode 640, owner bux:bux):
+Writes ~/.claude/browser.env for the current user:
     BU_CDP_URL=http://127.0.0.1:9222
     BU_CDP_WS=ws://127.0.0.1:9222/devtools/browser/<id>
     BU_BROWSER_ID=<id>
@@ -28,13 +28,14 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlparse
 
-STATE_DIR = pathlib.Path('/home/bux/.claude')
-ENV_FILE = STATE_DIR / 'browser.env'
+from user_paths import BROWSER_ENV as ENV_FILE, BUX_DATA_DIR
+
+STATE_DIR = ENV_FILE.parent
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 
 CDP_URL = os.environ.get('BUX_CDP_URL', 'http://127.0.0.1:9222')
 CHROME_BIN = os.environ.get('BUX_CHROME_BIN') or shutil.which('google-chrome') or shutil.which('chromium') or shutil.which('chromium-browser')
-CHROME_PROFILE_DIR = pathlib.Path(os.environ.get('BUX_CHROME_PROFILE_DIR', '/home/bux/browser-profile'))
+CHROME_PROFILE_DIR = pathlib.Path(os.environ.get('BUX_CHROME_PROFILE_DIR', str(BUX_DATA_DIR / 'browser-profile')))
 WINDOW_SIZE = os.environ.get('BUX_CHROME_WINDOW_SIZE', '1280,720')
 STARTUP_TIMEOUT_SEC = int(os.environ.get('BUX_CHROME_STARTUP_TIMEOUT_SEC', '30'))
 POLL_INTERVAL_SEC = int(os.environ.get('BUX_KEEPER_POLL_INTERVAL_SEC', '30'))
@@ -109,12 +110,6 @@ def write_env(ws: str, bid: str) -> None:
     finally:
         os.close(fd)
     tmp.replace(ENV_FILE)
-    try:
-        import pwd
-        u = pwd.getpwnam('bux')
-        os.chown(str(ENV_FILE), u.pw_uid, u.pw_gid)
-    except Exception:
-        pass
 
 
 def launch_browser() -> subprocess.Popen:
