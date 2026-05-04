@@ -1,187 +1,196 @@
 #!/usr/bin/env python3
-"""browser-keeper — maintains a long-lived Browser Use Cloud browser bound to
-the box's profile, so every task skips the 20-30s cold-start.
+"""browser-keeper — maintains a long-lived local Chrome session with CDP.
 
-Writes /home/bux/.claude/browser.env (mode 640, owner bux:bux) on each rotation:
-    BU_PROFILE_ID=<id>
+Writes /home/bux/.claude/browser.env (mode 640, owner bux:bux):
+    BU_CDP_URL=http://127.0.0.1:9222
+    BU_CDP_WS=ws://127.0.0.1:9222/devtools/browser/<id>
     BU_BROWSER_ID=<id>
-    BU_CDP_WS=<wss://…>
-    BU_BROWSER_LIVE_URL=<https://live.browser-use.com/...>
-    BU_BROWSER_EXPIRES_AT=<unix-epoch>
+    BU_BROWSER_LIVE_URL=
 
-Rotation: BU sessions cap at 240 min. We request a 239-min session, rotate
-30 min before expiry, keep the previous browser alive for 60 s grace so
-any in-flight task picks up the new env on its next call.
-
-One keeper per box = one browser per box. The browser is bound to the
-box's single profile_id. Privacy: no sharing across users or across boxes.
+Behavior:
+- If a Chrome/Chromium instance is already listening on BU_CDP_URL, attach to it.
+- Otherwise launch a dedicated browser with remote debugging on that URL.
+- Prefer a real window when DISPLAY/WAYLAND is present; fall back to headless.
+- Keep a persistent user-data-dir so cookies/logins survive restarts.
 """
+
+from __future__ import annotations
 
 import json
 import os
 import pathlib
+import shutil
 import signal
+import subprocess
 import sys
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
-
-API = os.environ.get('BROWSER_USE_API_BASE', 'https://api.browser-use.com/api/v3')
-API_KEY = os.environ.get('BROWSER_USE_API_KEY') or sys.exit('BROWSER_USE_API_KEY not set')
-PROFILE_ID = os.environ.get('BUX_PROFILE_ID') or sys.exit('BUX_PROFILE_ID not set')
+from urllib.parse import urlparse
 
 STATE_DIR = pathlib.Path('/home/bux/.claude')
 ENV_FILE = STATE_DIR / 'browser.env'
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 
-SESSION_MIN = 239
-ROTATE_AT_MIN_LEFT = 30
-GRACE_SEC = 60
+CDP_URL = os.environ.get('BUX_CDP_URL', 'http://127.0.0.1:9222')
+CHROME_BIN = os.environ.get('BUX_CHROME_BIN') or shutil.which('google-chrome') or shutil.which('chromium') or shutil.which('chromium-browser')
+CHROME_PROFILE_DIR = pathlib.Path(os.environ.get('BUX_CHROME_PROFILE_DIR', '/home/bux/browser-profile'))
+WINDOW_SIZE = os.environ.get('BUX_CHROME_WINDOW_SIZE', '1280,720')
+STARTUP_TIMEOUT_SEC = int(os.environ.get('BUX_CHROME_STARTUP_TIMEOUT_SEC', '30'))
+POLL_INTERVAL_SEC = int(os.environ.get('BUX_KEEPER_POLL_INTERVAL_SEC', '30'))
+
+if not CHROME_BIN:
+    sys.exit('no Chrome/Chromium binary found (set BUX_CHROME_BIN)')
+
+parsed = urlparse(CDP_URL)
+if parsed.scheme not in {'http', 'https'} or not parsed.hostname or not parsed.port:
+    sys.exit(f'invalid BUX_CDP_URL: {CDP_URL}')
+
+CDP_HOST = parsed.hostname
+CDP_PORT = parsed.port
+
+_current_proc: subprocess.Popen | None = None
+_owned_browser = False
 
 
-def bu_req(method, path, body=None, timeout=30):
-	data = json.dumps(body).encode() if body is not None else None
-	req = urllib.request.Request(
-		f'{API}{path}',
-		data=data,
-		headers={'X-Browser-Use-API-Key': API_KEY, 'Content-Type': 'application/json'},
-		method=method,
-	)
-	with urllib.request.urlopen(req, timeout=timeout) as r:
-		raw = r.read()
-		return json.loads(raw) if raw else {}
+def log(msg: str) -> None:
+    print(f'[keeper] {msg}', flush=True)
 
 
-def log(msg):
-	print(f'[keeper] {msg}', flush=True)
+def _http_json(url: str, timeout: int = 10) -> dict:
+    with urllib.request.urlopen(url, timeout=timeout) as r:
+        raw = r.read()
+        return json.loads(raw) if raw else {}
 
 
-def cdp_ws_from_url(cdp_url):
-	try:
-		with urllib.request.urlopen(f'{cdp_url}/json/version', timeout=15) as r:
-			return json.loads(r.read()).get('webSocketDebuggerUrl', '')
-	except Exception as e:
-		log(f'cdp version fetch failed: {e}')
-		return ''
+def browser_version() -> dict | None:
+    try:
+        return _http_json(f'{CDP_URL}/json/version', timeout=5)
+    except Exception:
+        return None
 
 
-def create_browser(profile_id):
-	r = bu_req('POST', '/browsers', {'profile_id': profile_id, 'timeout': SESSION_MIN})
-	bid = r.get('id')
-	cdp_url = r.get('cdpUrl') or r.get('cdp_url')
-	ws = cdp_ws_from_url(cdp_url) if cdp_url else ''
-	# liveUrl points at the public live-view UI (https://live.browser-use.com/...).
-	# The CDP create response sets it server-side — same value GET /browsers/{id}
-	# returns. Empty string when the backend hasn't computed it yet (rare).
-	live_url = r.get('liveUrl') or r.get('live_url') or ''
-	expires_at = int(time.time() + SESSION_MIN * 60)
-	return bid, ws, live_url, expires_at
+def browser_ws() -> str:
+    info = browser_version() or {}
+    return str(info.get('webSocketDebuggerUrl') or '')
 
 
-def stop_browser(bid):
-	try:
-		bu_req('PATCH', f'/browsers/{bid}', {'action': 'stop'})
-	except Exception as e:
-		log(f'stop {bid} failed: {e!r}')
+def browser_id_from_ws(ws: str) -> str:
+    marker = '/devtools/browser/'
+    if marker in ws:
+        return ws.split(marker, 1)[1].strip()
+    return ''
 
 
-def health_check(ws):
-	if not ws:
-		return False
-	try:
-		http = ws.replace('wss://', 'https://').split('/devtools/')[0]
-		with urllib.request.urlopen(f'{http}/json/version', timeout=10) as r:
-			r.read()
-		return True
-	except Exception as e:
-		log(f'health check failed: {e!r}')
-		return False
+def health_check() -> tuple[bool, str, str]:
+    info = browser_version()
+    if not info:
+        return False, '', ''
+    ws = str(info.get('webSocketDebuggerUrl') or '')
+    bid = browser_id_from_ws(ws)
+    return bool(ws), ws, bid
 
 
-def write_env(profile_id, bid, ws, live_url, expires_at):
-	# Contains the signed CDP URL (BU_CDP_WS) — world-readable window is
-	# unacceptable. O_EXCL guarantees the file is freshly created (we own
-	# the mode); O_CLOEXEC prevents accidental fd inheritance. Any stale
-	# .tmp from a prior crash is unlinked first so O_EXCL doesn't fail.
-	tmp = ENV_FILE.with_suffix('.tmp')
-	payload = (
-		f'BU_PROFILE_ID={profile_id}\n'
-		f'BU_BROWSER_ID={bid}\n'
-		f'BU_CDP_WS={ws}\n'
-		f'BU_BROWSER_LIVE_URL={live_url}\n'
-		f'BU_BROWSER_EXPIRES_AT={expires_at}\n'
-	)
-	try:
-		os.unlink(tmp)
-	except FileNotFoundError:
-		pass
-	fd = os.open(
-		str(tmp),
-		os.O_CREAT | os.O_WRONLY | os.O_EXCL | os.O_CLOEXEC,
-		0o640,
-	)
-	try:
-		os.write(fd, payload.encode())
-	finally:
-		os.close(fd)
-	tmp.replace(ENV_FILE)  # atomic rename preserves the tempfile's mode
-	# Ensure bux owns it (keeper usually runs as bux, but belt-and-suspenders).
-	try:
-		import pwd
-
-		u = pwd.getpwnam('bux')
-		os.chown(str(ENV_FILE), u.pw_uid, u.pw_gid)
-	except Exception:
-		pass
+def write_env(ws: str, bid: str) -> None:
+    tmp = ENV_FILE.with_suffix('.tmp')
+    payload = (
+        f'BU_CDP_URL={CDP_URL}\n'
+        f'BU_CDP_WS={ws}\n'
+        f'BU_BROWSER_ID={bid}\n'
+        'BU_BROWSER_LIVE_URL=\n'
+    )
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_EXCL | os.O_CLOEXEC, 0o640)
+    try:
+        os.write(fd, payload.encode())
+    finally:
+        os.close(fd)
+    tmp.replace(ENV_FILE)
+    try:
+        import pwd
+        u = pwd.getpwnam('bux')
+        os.chown(str(ENV_FILE), u.pw_uid, u.pw_gid)
+    except Exception:
+        pass
 
 
-_current = None
+def launch_browser() -> subprocess.Popen:
+    CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    has_gui = bool(os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY'))
+    cmd = [
+        CHROME_BIN,
+        f'--remote-debugging-port={CDP_PORT}',
+        f'--remote-debugging-address={CDP_HOST}',
+        f'--user-data-dir={CHROME_PROFILE_DIR}',
+        f'--window-size={WINDOW_SIZE}',
+        '--no-first-run',
+        '--no-default-browser-check',
+        'about:blank',
+    ]
+    if not has_gui:
+        cmd.insert(1, '--headless=new')
+    log(f'launching local Chrome: {cmd[0]} on {CDP_URL} (gui={has_gui})')
+    return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def shutdown(*_):
-	if _current:
-		log(f'shutting down, stopping {_current[0]}')
-		stop_browser(_current[0])
-	sys.exit(0)
+def ensure_browser() -> tuple[str, str]:
+    global _current_proc, _owned_browser
+    ok, ws, bid = health_check()
+    if ok:
+        _owned_browser = False
+        return ws, bid
+
+    if _current_proc is None or _current_proc.poll() is not None:
+        _current_proc = launch_browser()
+        _owned_browser = True
+
+    deadline = time.time() + STARTUP_TIMEOUT_SEC
+    while time.time() < deadline:
+        ok, ws, bid = health_check()
+        if ok:
+            return ws, bid
+        if _current_proc is not None and _current_proc.poll() is not None:
+            raise RuntimeError(f'chrome exited early rc={_current_proc.returncode}')
+        time.sleep(1)
+    raise RuntimeError(f'chrome did not expose CDP at {CDP_URL} within {STARTUP_TIMEOUT_SEC}s')
 
 
-def main():
-	global _current
-	signal.signal(signal.SIGTERM, shutdown)
-	signal.signal(signal.SIGINT, shutdown)
+def shutdown(*_args) -> None:
+    global _current_proc
+    if _owned_browser and _current_proc is not None and _current_proc.poll() is None:
+        log('shutting down owned Chrome process')
+        try:
+            _current_proc.terminate()
+            _current_proc.wait(timeout=10)
+        except Exception:
+            try:
+                _current_proc.kill()
+            except Exception:
+                pass
+    sys.exit(0)
 
-	log(f'bound to profile {PROFILE_ID}')
 
-	while True:
-		try:
-			bid, ws, live_url, expires_at = create_browser(PROFILE_ID)
-			log(f'created browser {bid} ws={ws[:60]}… expires_at={expires_at}')
+def main() -> None:
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
 
-			if not health_check(ws):
-				log('fresh browser failed health check, retrying in 15s')
-				stop_browser(bid)
-				time.sleep(15)
-				continue
-
-			prev = _current
-			_current = (bid, ws, expires_at)
-			write_env(PROFILE_ID, bid, ws, live_url, expires_at)
-			log(f'wrote {ENV_FILE}')
-
-			if prev:
-				time.sleep(GRACE_SEC)
-				log(f'stopping previous browser {prev[0]} after {GRACE_SEC}s grace')
-				stop_browser(prev[0])
-
-			sleep_until = expires_at - ROTATE_AT_MIN_LEFT * 60
-			sleep_for = max(60, sleep_until - time.time())
-			log(f'sleeping {int(sleep_for)}s before rotation')
-			time.sleep(sleep_for)
-		except Exception as e:
-			log(f'loop error: {e!r}, sleeping 30s')
-			time.sleep(30)
+    log(f'keeping local browser ready on {CDP_URL}')
+    last_ws = ''
+    while True:
+        try:
+            ws, bid = ensure_browser()
+            if ws != last_ws:
+                write_env(ws, bid)
+                last_ws = ws
+                log(f'wrote {ENV_FILE} ws={ws}')
+            time.sleep(POLL_INTERVAL_SEC)
+        except Exception as e:
+            log(f'loop error: {e!r}, sleeping 5s')
+            time.sleep(5)
 
 
 if __name__ == '__main__':
-	main()
+    main()

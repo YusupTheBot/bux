@@ -1,13 +1,13 @@
 # Installing bux
 
-bux runs on any box that runs Ubuntu / Debian 22.04+. 2GB RAM is enough. Pick whatever's cheapest — the cloud browser lives on browser-use infrastructure, not your box.
+bux runs on any box that runs Ubuntu / Debian 22.04+. 2GB RAM is enough. For this fork, the browser runs locally on your box through Chrome CDP, so the host needs a working Chrome/Chromium path.
 
 ## The 30-second version
 
 ```bash
 ssh root@your-box
 curl -fsSL https://raw.githubusercontent.com/browser-use/bux/main/install.sh \
-  | sudo BROWSER_USE_API_KEY=bu_xxx bash
+  | sudo bash
 ```
 
 That's it. Skip to [first run](#first-run).
@@ -32,9 +32,16 @@ Any of these work. Pick one you already use.
 **Existing server**
 - If you already have a dev box, bux can share it — it adds a `bux` user and runs everything under `/opt/bux`. Installer is idempotent.
 
-### 2. Get API keys
+### 2. Make sure Chrome is available
 
-**Browser Use Cloud** — https://cloud.browser-use.com/new-api-key (free tier: 3 concurrent browsers, proxies, CAPTCHA).
+This fork expects a local Chrome/Chromium browser path on the box, or a reachable CDP endpoint at `http://127.0.0.1:9222`.
+
+Useful checks:
+
+```bash
+command -v google-chrome || command -v chromium || command -v chromium-browser
+curl -s http://127.0.0.1:9222/json/version || true
+```
 
 **Telegram bot (optional)** — message [@BotFather](https://t.me/BotFather) on Telegram:
 
@@ -56,13 +63,13 @@ curl -fsSL https://raw.githubusercontent.com/browser-use/bux/main/install.sh | s
 
 # Or one-shot with everything up front:
 curl -fsSL https://raw.githubusercontent.com/browser-use/bux/main/install.sh \
-  | sudo BROWSER_USE_API_KEY=bu_xxx TG_BOT_TOKEN=123:abc bash
+  | sudo TG_BOT_TOKEN=123:abc BUX_CDP_URL=http://127.0.0.1:9222 bash
 ```
 
 The script:
-1. Installs Node.js 24 + Claude Code + ttyd + browser-harness
+1. Installs Node.js 24 + Claude Code + ttyd + Python `browser-harness`
 2. Creates a `bux` system user with its own venv
-3. Drops the browser-keeper + telegram-bot + systemd units
+3. Drops the local Chrome browser-keeper + telegram-bot + systemd units
 4. Installs [ztk](https://github.com/codejunkie99/ztk) (pinned) — compresses long Bash tool outputs before they hit Claude's context. Opt out with `WITH_ZTK=0`.
 5. Starts everything
 
@@ -108,7 +115,7 @@ you: hi
 bot: 🔒 This bot is now locked to this chat only.
 
 you: /live
-bot: 🖥 https://live.browser-use.com?wss=...
+bot: ℹ️ local browser mode has no shareable live view; use the host machine's Chrome window
 
 you: check my email, find unread from today, one-line summary each
 bot: 🧠 on it…
@@ -134,7 +141,7 @@ bot: done, want to see the draft first?
 ```bash
 sudo journalctl -u bux-browser-keeper -n 50
 ```
-Most common cause: bad `BROWSER_USE_API_KEY`. Edit `/etc/bux/env`, restart.
+Most common causes: Chrome isn't installed, `BUX_CHROME_BIN` points to the wrong binary, or nothing is listening on `BUX_CDP_URL`. Edit `/etc/bux/env`, restart.
 
 **TG bot silent after sending a message**
 ```bash
@@ -150,11 +157,11 @@ sudo npm install -g @anthropic-ai/claude-code@latest
 sudo systemctl restart bux-tg
 ```
 
-**claude says "no CDP_WS set"**
+**browser-harness says no CDP endpoint is set**
 The browser-keeper hasn't written `~/.claude/browser.env` yet. Wait 10s on first boot, or:
 ```bash
 sudo systemctl restart bux-browser-keeper
-cat /home/bux/.claude/browser.env   # should have BU_CDP_WS=wss://...
+cat /home/bux/.claude/browser.env   # should have BU_CDP_URL=http://127.0.0.1:9222
 ```
 
 **Need a clean slate**

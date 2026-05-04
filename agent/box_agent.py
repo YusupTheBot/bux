@@ -145,8 +145,8 @@ def _claude_cmd(*args: str) -> list[str]:
 	return [CLAUDE_BIN, 'run', '-d', 'vibe', '--', *args]
 
 
-# Written by browser-keeper.service on each rotation. Source of truth for
-# BU_BROWSER_ID + BU_CDP_WS + BU_BROWSER_LIVE_URL on the box.
+# Written by browser-keeper.service. Source of truth for the local browser's
+# CDP endpoint and derived browser id on the box.
 BROWSER_ENV_PATH = '/home/bux/.claude/browser.env'
 
 
@@ -695,12 +695,12 @@ class Agent:
 			LOG.exception('auth_poll_loop crashed')
 
 	async def _browser_id_poll_loop(self) -> None:
-		"""Watch BROWSER_ENV_PATH for BU_BROWSER_ID changes.
+		"""Watch BROWSER_ENV_PATH for local browser identity changes.
 
-		The keeper rewrites the file on each rotation (~every 209 min). We
-		poll its mtime cheaply and re-parse on change, sending one
-		`browser_update` over WS whenever the id moves. Initial value is
-		also reported so the cloud row is correct on (re)connect.
+		The keeper rewrites the file whenever the local CDP endpoint or derived
+		browser id changes. We poll its mtime cheaply and re-parse on change,
+		sending one `browser_update` over WS whenever the id moves. Initial
+		value is also reported so the cloud row is correct on (re)connect.
 
 		Polling beats inotify here: the `aiofiles`/`watchdog` deps aren't
 		on the box's tiny venv, and a 30 s mtime check is essentially free.
@@ -902,7 +902,7 @@ class Agent:
 			return
 		LOG.info('run_task %s: %s', task_id, prompt[:120])
 		# Agent runs as the `bux` user already (per systemd). Spawn claude
-		# directly — no sudo needed. Forward BU envs for browser-harness.
+		# directly — no sudo needed. Forward local browser CDP envs.
 		box_env = load_env()
 		child_env = {
 			**os.environ,
@@ -910,11 +910,20 @@ class Agent:
 			'USER': 'bux',
 			'PATH': '/home/bux/.local/bin:/usr/local/bin:/usr/bin:/bin:' + os.environ.get('PATH', ''),
 		}
-		if box_env.get('BROWSER_USE_API_KEY'):
-			child_env['BROWSER_USE_API_KEY'] = box_env['BROWSER_USE_API_KEY']
-		if box_env.get('BUX_PROFILE_ID'):
-			child_env['BU_PROFILE_ID'] = box_env['BUX_PROFILE_ID']
-			child_env['BUX_PROFILE_ID'] = box_env['BUX_PROFILE_ID']
+		browser_env = {}
+		try:
+			with open(BROWSER_ENV_PATH) as f:
+				for line in f:
+					line = line.strip()
+					if not line or '=' not in line:
+						continue
+					k, v = line.split('=', 1)
+					browser_env[k] = v
+		except FileNotFoundError:
+			pass
+		for k in ('BU_CDP_URL', 'BU_CDP_WS', 'BU_BROWSER_ID', 'BU_BROWSER_LIVE_URL'):
+			if browser_env.get(k):
+				child_env[k] = browser_env[k]
 
 		session_args = self._session_args()
 

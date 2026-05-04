@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
-# bux install — set up Claude Code + Browser Use Cloud browser + optional
+# bux install — set up Claude Code + local Chrome CDP browser + optional
 # Telegram bot on a fresh Ubuntu / Debian box.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/browser-use/bux/main/install.sh \
-#     | sudo BROWSER_USE_API_KEY=bu_xxx bash
+#     | sudo bash
 #
 # Or clone + run locally:
 #   git clone https://github.com/browser-use/bux && cd bux && sudo ./install.sh
 #
 # BUX_REF (default: main) controls which ref the curl-pipe installer pulls
 # from. Set it to a commit sha if you want to pin:
-#   curl … | sudo BUX_REF=<sha> BROWSER_USE_API_KEY=bu_xxx bash
+#   curl … | sudo BUX_REF=<sha> bash
 #
 # Optional env vars:
-#   BROWSER_USE_API_KEY  — Browser Use Cloud key (required; prompts if missing)
+#   BUX_CDP_URL          — local Chrome DevTools endpoint (default http://127.0.0.1:9222)
+#   BUX_CHROME_BIN       — explicit Chrome/Chromium binary path if auto-detect fails
 #   TG_BOT_TOKEN         — Telegram bot token (enables the TG bot if set)
 #   TG_OWNER_ID          — Telegram numeric user_id of the box owner. When set,
 #                          the bot pins the owner identity at install time
@@ -71,23 +72,18 @@ if [ "$REPO_DIR" = '/dev' ] || [ ! -f "$REPO_DIR/agent/browser_keeper.py" ]; the
 fi
 
 # --- collect config --------------------------------------------------------
-BROWSER_USE_API_KEY="${BROWSER_USE_API_KEY:-}"
-BUX_PROFILE_ID="${BUX_PROFILE_ID:-}"
+BUX_CDP_URL="${BUX_CDP_URL:-http://127.0.0.1:9222}"
+BUX_CHROME_BIN="${BUX_CHROME_BIN:-}"
 
 # If /etc/bux/env already exists (rerun), seed missing values from it so the
-# script is truly idempotent without making the user re-type secrets.
-if [ -z "$BROWSER_USE_API_KEY" ] && [ -r /etc/bux/env ]; then
+# script is truly idempotent without making the user re-type config.
+if [ -r /etc/bux/env ]; then
 	# shellcheck disable=SC1091
-	BROWSER_USE_API_KEY="$(. /etc/bux/env && printf %s "${BROWSER_USE_API_KEY:-}")"
+	BUX_CDP_URL="${BUX_CDP_URL:-$(. /etc/bux/env && printf %s "${BUX_CDP_URL:-}")}"
 	# shellcheck disable=SC1091
-	BUX_PROFILE_ID="${BUX_PROFILE_ID:-$(. /etc/bux/env && printf %s "${BUX_PROFILE_ID:-}")}"
+	BUX_CHROME_BIN="${BUX_CHROME_BIN:-$(. /etc/bux/env && printf %s "${BUX_CHROME_BIN:-}")}"
 fi
 
-if [ -z "$BROWSER_USE_API_KEY" ] && [ -t 0 ]; then
-	printf '%sBROWSER_USE_API_KEY%s (get one at https://cloud.browser-use.com/new-api-key): ' "$c_bold" "$c_reset"
-	read -r BROWSER_USE_API_KEY
-fi
-[ -n "$BROWSER_USE_API_KEY" ] || die 'BROWSER_USE_API_KEY is required (export it or pass via env)'
 TG_BOT_TOKEN="${TG_BOT_TOKEN:-}"
 
 # --- base packages ---------------------------------------------------------
@@ -271,17 +267,16 @@ fi
 sudo -u bux /opt/bux/venv/bin/pip install --quiet --upgrade pip
 sudo -u bux /opt/bux/venv/bin/pip install --quiet websockets httpx
 
-# --- browser-harness-js skill ---------------------------------------------
-if [ ! -d /home/bux/.claude/skills/cdp ]; then
-	say 'installing browser-harness-js skill'
+# --- browser-harness (primary local browser driver) -----------------------
+install -d -o bux -g bux -m 0755 /home/bux/src
+if [ ! -d /home/bux/src/browser-harness/.git ]; then
+	say 'installing browser-harness'
 	sudo -u bux git clone --depth=1 \
-		https://github.com/browser-use/browser-harness-js \
-		/home/bux/.claude/skills/cdp
+		https://github.com/browser-use/browser-harness \
+		/home/bux/src/browser-harness
 fi
-if [ -f /home/bux/.claude/skills/cdp/sdk/browser-harness-js ]; then
-	ln -sf /home/bux/.claude/skills/cdp/sdk/browser-harness-js /usr/local/bin/browser-harness-js
-	chmod +x /home/bux/.claude/skills/cdp/sdk/browser-harness-js
-fi
+sudo -u bux -H "$(command -v uv)" tool install --force \
+	--from /home/bux/src/browser-harness browser-harness
 
 # --- ztk (compresses Bash tool outputs before they hit context) ------------
 # https://github.com/codejunkie99/ztk — Zig CLI that registers a PreToolUse
@@ -472,8 +467,8 @@ fi
 # --- /etc/bux/env (shared by systemd services) -----------------------------
 if [ ! -f /etc/bux/env ]; then
 	cat > /etc/bux/env <<EOF
-BROWSER_USE_API_KEY=$BROWSER_USE_API_KEY
-BUX_PROFILE_ID=$BUX_PROFILE_ID
+BUX_CDP_URL=$BUX_CDP_URL
+BUX_CHROME_BIN=$BUX_CHROME_BIN
 EOF
 	chmod 640 /etc/bux/env
 	chown root:bux /etc/bux/env
@@ -573,11 +568,11 @@ fi
 if ! grep -q 'BU_BROWSER_LIVE_URL' /home/bux/.profile 2>/dev/null; then
 	cat >> /home/bux/.profile <<'PROFILE'
 
-# Show the live browser URL so users have one click to spectate / take over.
+# Show the local browser handoff details on login.
 if [ -r "$HOME/.claude/browser.env" ]; then
 	. "$HOME/.claude/browser.env" 2>/dev/null || true
-	if [ -n "${BU_BROWSER_LIVE_URL:-}" ]; then
-		printf '\n  \033[1mLive browser:\033[0m %s\n\n' "$BU_BROWSER_LIVE_URL"
+	if [ -n "${BU_CDP_URL:-}" ]; then
+		printf '\n  \033[1mBrowser CDP:\033[0m %s\n\n' "$BU_CDP_URL"
 	fi
 fi
 PROFILE

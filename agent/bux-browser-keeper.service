@@ -1,5 +1,5 @@
 [Unit]
-Description=bux browser-keeper (long-lived Browser Use Cloud browser)
+Description=bux browser-keeper (local Chrome CDP browser)
 After=network-online.target box-agent.service
 Wants=network-online.target
 ConditionPathExists=/etc/bux/env

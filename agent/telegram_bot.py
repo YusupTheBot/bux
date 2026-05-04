@@ -2981,8 +2981,8 @@ class Bot:
         Picks up:
           - HOME / USER / PATH so login-shell paths resolve (needed for
             the per-user `~/.npm-global/bin/codex` lookup, ~/.local/bin tools).
-          - BU_* + BROWSER_USE_API_KEY + BUX_PROFILE_ID so claude can drive
-            the browser without re-fetching credentials.
+          - BU_CDP_URL / BU_CDP_WS / BU_BROWSER_ID from browser.env so the
+            agent can drive the local browser without rediscovering CDP.
           - OPENAI_* from /home/bux/.secrets/openai.env (codex needs this).
           - TG_CHAT_ID + TG_THREAD_ID so `tg-send` routes back to this
             forum topic when the agent shells out for background work.
@@ -3004,12 +3004,7 @@ class Bot:
             # then standard system bins. The bot's own PATH (root) isn't relevant.
             "PATH": "/home/bux/.local/bin:/home/bux/.npm-global/bin:/usr/local/bin:/usr/bin:/bin",
         }
-        if box_env.get("BROWSER_USE_API_KEY"):
-            env["BROWSER_USE_API_KEY"] = box_env["BROWSER_USE_API_KEY"]
-        if box_env.get("BUX_PROFILE_ID"):
-            env["BUX_PROFILE_ID"] = box_env["BUX_PROFILE_ID"]
-            env["BU_PROFILE_ID"] = box_env["BUX_PROFILE_ID"]
-        for k in ("BU_CDP_WS", "BU_BROWSER_ID"):
+        for k in ("BU_CDP_URL", "BU_CDP_WS", "BU_BROWSER_ID", "BU_BROWSER_LIVE_URL"):
             if browser_env.get(k):
                 env[k] = browser_env[k]
         for k, v in openai_env.items():
@@ -4237,7 +4232,7 @@ class Bot:
                 "/claude login — sign in Claude through a terminal flow\n"
                 "/claude logout — sign out Claude\n"
                 "/agent claude|codex — switch this topic to a different agent\n"
-                "/live — live-view URL of the active browser\n"
+                "/live — local browser handoff / CDP info\n"
                 "/queue — pending tasks in this topic\n"
                 "/cancel — kill the running task / terminal + drop "
                 "everything pending in this topic\n"
@@ -5293,27 +5288,17 @@ class Bot:
     # ----- Live URL -----
 
     def _live_url(self) -> str:
-        box_env = _read_kv(BOX_ENV)
         browser_env = _read_kv(BROWSER_ENV)
-        api_key = box_env.get("BROWSER_USE_API_KEY")
-        browser_id = browser_env.get("BU_BROWSER_ID")
-        if not api_key:
-            return "❌ no BROWSER_USE_API_KEY on this box"
-        if not browser_id:
-            return "❌ no active browser yet — keeper may still be starting"
-        try:
-            r = httpx.get(
-                f"https://api.browser-use.com/api/v3/browsers/{browser_id}",
-                headers={"X-Browser-Use-API-Key": api_key},
-                timeout=10,
-            )
-            r.raise_for_status()
-            live = r.json().get("liveUrl")
-            if not live:
-                return "❌ browser has no liveUrl (session may be stale)"
+        live = browser_env.get("BU_BROWSER_LIVE_URL") or ""
+        if live:
             return f"🖥 {live}"
-        except Exception as e:
-            return f"❌ live-url lookup failed: {e}"
+        cdp_url = browser_env.get("BU_CDP_URL") or browser_env.get("BU_CDP_WS") or ""
+        if cdp_url:
+            return (
+                "ℹ️ local browser mode has no shareable live-view URL. "
+                f"Use the machine's real Chrome window or CDP endpoint: {cdp_url}"
+            )
+        return "❌ no active browser yet — keeper may still be starting"
 
     # ----- Poll loop -----
 
