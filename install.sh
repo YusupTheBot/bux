@@ -523,6 +523,38 @@ fi
 sudo -u bux -H npm config set prefix /home/bux/.npm-global 2>/dev/null || true
 install -d -o bux -g bux -m 0755 /home/bux/.npm-global /home/bux/.local /home/bux/.local/bin
 
+# --- viberelay (Claude wrapper / local proxy profile runner) ---------------
+# Stage 1 of the bux fork routes all Claude invocations through:
+#   viberelay run -d vibe -- <claude-args>
+# so the box needs the viberelay CLI + daemon, and a pre-created `vibe`
+# profile. Account tokens / routing settings can then be pushed from the
+# user's laptop with `viberelay sync bux@<host>`.
+loginctl enable-linger bux >/dev/null 2>&1 || true
+if ! sudo -iu bux test -x /home/bux/.local/bin/viberelay; then
+	say 'installing viberelay'
+	sudo -iu bux env VIBERELAY_AUTO_SERVICE=1 bash -lc \
+		'curl -fsSL https://github.com/vibeproxy/viberelay/releases/latest/download/install.sh | bash'
+fi
+install -d -o bux -g bux -m 0755 /home/bux/.viberelay/profiles
+if [ ! -f /home/bux/.viberelay/profiles/vibe.json ]; then
+	cat > /home/bux/.viberelay/profiles/vibe.json <<'JSON'
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8327",
+    "ANTHROPIC_AUTH_TOKEN": "viberelay-local",
+    "ANTHROPIC_MODEL": "high[1m]",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "high[1m]",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "mid[1m]",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "low[1m]",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "low[1m]"
+  }
+}
+JSON
+	chown bux:bux /home/bux/.viberelay/profiles/vibe.json
+	chmod 0644 /home/bux/.viberelay/profiles/vibe.json
+fi
+sudo -iu bux /home/bux/.local/bin/viberelay start >/dev/null 2>&1 || true
+
 # --- Codex CLI (alternative agent, /codex per forum topic) -----------------
 # Pre-install for the bux user so `/codex login` (or auto-dispatch
 # via `/codex`) works without a manual install. Auth is left to the

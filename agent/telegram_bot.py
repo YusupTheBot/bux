@@ -50,6 +50,7 @@ import random
 import re
 import secrets
 import select
+import shutil
 import signal
 import struct
 import subprocess
@@ -96,6 +97,12 @@ LEGACY_SESSION_FILE = Path("/home/bux/.bux/session")
 # ~/.claude/projects/-home-bux/<uuid>.jsonl, so different UUIDs in the same
 # project dir give independent conversations without separate workspaces.
 WORKSPACE = Path("/home/bux")
+VIBERELAY_BIN = os.environ.get("VIBERELAY_BIN") or shutil.which("viberelay") or "/home/bux/.local/bin/viberelay"
+
+
+def _claude_cli(*args: str) -> list[str]:
+    return [VIBERELAY_BIN, "run", "-d", "vibe", "--", *args]
+
 
 POLL_TIMEOUT = 30
 REPLY_MAX = 3500  # TG's hard cap is 4096; keep headroom for reply trailers.
@@ -2395,7 +2402,7 @@ def _normalize_login_provider_name(name: str) -> str:
 def _claude_login_status() -> tuple[bool, str]:
     try:
         r = subprocess.run(
-            ["sudo", "-iu", "bux", "claude", "auth", "status"],
+            ["sudo", "-iu", "bux", *_claude_cli("auth", "status")],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -3101,8 +3108,7 @@ class Bot:
         # creates and errors if the UUID already exists, `--resume <uuid>`
         # continues an existing session. Pick based on transcript presence.
         cmd = ["sudo", "-u", "bux", "-H"] + [f"{k}={v}" for k, v in env.items() if v]
-        cmd += [
-            "/usr/bin/claude",
+        cmd += _claude_cli(
             "-p",
             *_claude_session_flag(sid),
             "--permission-mode",
@@ -3111,7 +3117,7 @@ class Bot:
             "stream-json",
             "--verbose",  # stream-json requires --verbose
             prompt,
-        ]
+        )
 
         try:
             # stderr=DEVNULL: stream-json puts everything we care about on
@@ -3286,8 +3292,7 @@ class Bot:
                 # the user gets *something*. Keeps the bot honest if claude
                 # hiccuped on the streaming format.
                 fb_cmd = ["sudo", "-u", "bux", "-H"] + [f"{k}={v}" for k, v in env.items() if v]
-                fb_cmd += [
-                    "/usr/bin/claude",
+                fb_cmd += _claude_cli(
                     "-p",
                     *_claude_session_flag(sid),
                     "--permission-mode",
@@ -3295,7 +3300,7 @@ class Bot:
                     "--output-format",
                     "text",
                     prompt,
-                ]
+                )
                 try:
                     # No env= here: the `sudo VAR=val …` prefix is the only env
                     # the child claude sees. Don't leak the bot's own environ
@@ -5118,7 +5123,7 @@ class Bot:
                 chat_id=chat_id,
                 thread_id=thread_id,
                 slug=slug,
-                initial_cmd="claude auth login",
+                initial_cmd="viberelay run -d vibe -- auth login",
                 reply_to=reply_to,
                 auto_enter_after_input_sec=2.0,
                 close_on_success_patterns=(
@@ -5200,7 +5205,7 @@ class Bot:
             return
         try:
             r = subprocess.run(
-                ["sudo", "-iu", "bux", "claude", "auth", "logout"],
+                ["sudo", "-iu", "bux", *_claude_cli("auth", "logout")],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,

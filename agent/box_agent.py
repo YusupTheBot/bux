@@ -23,6 +23,7 @@ import logging
 import os
 import pty
 import select
+import shutil
 import signal
 import sys
 import termios
@@ -137,7 +138,13 @@ def _read_tg_bot_username() -> str | None:
 # shells out to `claude auth status` every 1s (first minute) or 15s (after)
 # and pushes `claude_authed` over WS the moment it flips to loggedIn.
 
-CLAUDE_BIN = '/usr/bin/claude'
+CLAUDE_BIN = os.environ.get('VIBERELAY_BIN') or shutil.which('viberelay') or '/home/bux/.local/bin/viberelay'
+
+
+def _claude_cmd(*args: str) -> list[str]:
+	return [CLAUDE_BIN, 'run', '-d', 'vibe', '--', *args]
+
+
 # Written by browser-keeper.service on each rotation. Source of truth for
 # BU_BROWSER_ID + BU_CDP_WS + BU_BROWSER_LIVE_URL on the box.
 BROWSER_ENV_PATH = '/home/bux/.claude/browser.env'
@@ -212,9 +219,10 @@ async def check_claude_authed() -> bool:
 	"""
 	try:
 		proc = await asyncio.create_subprocess_exec(
-			CLAUDE_BIN,
-			'auth',
-			'status',
+			*_claude_cmd(
+				'auth',
+				'status',
+			),
 			stdout=asyncio.subprocess.PIPE,
 			stderr=asyncio.subprocess.STDOUT,
 			env={**os.environ, 'HOME': '/home/bux'},
@@ -384,7 +392,8 @@ class ShellSession:
 		# command so the shell survives WS reconnects.
 		if launch == 'claude':
 			claude_cmd = (
-				'claude --dangerously-skip-permissions' if dsp_enabled else 'claude'
+				'viberelay run -d vibe -- --dangerously-skip-permissions'
+				if dsp_enabled else 'viberelay run -d vibe --'
 			)
 			# `; exec bash -l` so when claude quits the user lands in a
 			# bash prompt instead of the tmux session ending.
@@ -581,8 +590,9 @@ class Agent:
 			outcome = 'failed'
 			try:
 				proc = await asyncio.create_subprocess_exec(
-					CLAUDE_BIN,
-					'--version',
+					*_claude_cmd(
+						'--version',
+					),
 					stdout=asyncio.subprocess.DEVNULL,
 					stderr=asyncio.subprocess.DEVNULL,
 					env={**os.environ, 'HOME': '/home/bux'},
@@ -898,7 +908,7 @@ class Agent:
 			**os.environ,
 			'HOME': '/home/bux',
 			'USER': 'bux',
-			'PATH': '/usr/local/bin:/usr/bin:/bin:' + os.environ.get('PATH', ''),
+			'PATH': '/home/bux/.local/bin:/usr/local/bin:/usr/bin:/bin:' + os.environ.get('PATH', ''),
 		}
 		if box_env.get('BROWSER_USE_API_KEY'):
 			child_env['BROWSER_USE_API_KEY'] = box_env['BROWSER_USE_API_KEY']
@@ -928,14 +938,15 @@ class Agent:
 		try:
 			try:
 				proc = await asyncio.create_subprocess_exec(
-					'/usr/bin/claude',
-					'-p',
-					*session_args,
-					'--output-format',
-					'text',
-					'--permission-mode',
-					'bypassPermissions',
-					prompt,
+					*_claude_cmd(
+						'-p',
+						*session_args,
+						'--output-format',
+						'text',
+						'--permission-mode',
+						'bypassPermissions',
+						prompt,
+					),
 					stdout=asyncio.subprocess.PIPE,
 					stderr=asyncio.subprocess.STDOUT,
 					cwd='/home/bux',
@@ -1443,7 +1454,7 @@ class Agent:
 				_os.environ['HOME'] = '/home/bux'
 				_os.environ['COLUMNS'] = '1000'
 				_os.environ['LINES'] = '50'
-				_os.execvp('/usr/bin/claude', ['/usr/bin/claude', 'auth', 'login'])
+				_os.execvp(CLAUDE_BIN, _claude_cmd('auth', 'login'))
 			except Exception:
 				_os._exit(127)
 
