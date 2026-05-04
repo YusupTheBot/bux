@@ -33,10 +33,10 @@ Two patterns to keep the lane responsive:
 
 1. **In-process delegation** (sub-tasks under ~60s): spawn a sub-agent via the `Agent` tool, with `run_in_background: true` when the work is independent. Brief it like a colleague: file paths, line numbers, what you've tried, what success looks like, what to return. Run multiple sub-agents in parallel when independent.
 
-2. **OS-level backgrounding (worker-self-notify)** for tasks that genuinely take minutes: detach a fresh `claude -p` and pipe its output to `tg-send`, then return immediately so the user can keep texting. The `tg-send` helper inherits `TG_THREAD_ID` from your env, so the result lands in the **same forum topic** the user asked from, not the chat root. Pass `--dangerously-skip-permissions` so the backgrounded agent doesn't stall on approval prompts:
+2. **OS-level backgrounding (worker-self-notify)** for tasks that genuinely take minutes: detach a fresh agent run and pipe its output to `tg-send`, then return immediately so the user can keep texting. The `tg-send` helper inherits `TG_THREAD_ID` from your env, so the result lands in the **same forum topic** the user asked from, not the chat root. Pass `--dangerously-skip-permissions` so the backgrounded agent doesn't stall on approval prompts:
 
    ```bash
-   nohup bash -c 'claude --dangerously-skip-permissions -p "deep-research X and summarize" | tg-send' >/dev/null 2>&1 &
+   nohup bash -c 'viberelay run -d vibe -- --dangerously-skip-permissions -p "deep-research X and summarize" | tg-send' >/dev/null 2>&1 &
    ```
 
    Tell the user what you kicked off (one short line) and return. They keep texting; the background worker pings back when done. This is the only way to give the user the "main agent stays available while sub-agents run" experience — you literally have to fork-and-detach because your own `claude -p` process exits when this turn ends.
@@ -251,12 +251,13 @@ When the user asks you to "remind me in 5 minutes", "schedule X for 9am tomorrow
 
 ### `tg-send` — push a Telegram message from any shell
 
-`tg-send` posts a message to the user's bound TG chat. It accepts the message either as an argument **or** on stdin, so it pipes naturally:
+`tg-send` posts a message to the user's bound TG chat. It accepts the message either as an argument **or** on stdin, and it can also send file attachments back to Telegram:
 
 ```bash
-tg-send "Reminder: take your meds"              # arg form
-echo "all done" | tg-send                       # stdin form
-claude -p "summarize my email" | tg-send        # the recurring use case
+tg-send "Reminder: take your meds"                              # arg form
+echo "all done" | tg-send                                       # stdin form
+viberelay run -d vibe -- -p "summarize my email" | tg-send      # recurring text result
+tg-send --file /tmp/screenshot.png --caption "What I found"     # send photo / document
 ```
 
 - Reads the bot token from `/etc/bux/tg.env` (mode 640 root:bux, readable by you).

@@ -68,16 +68,36 @@ The script:
 
 Takes ~2-3 minutes on a fresh box. Idempotent — safe to rerun after edits.
 
-### 4. First run
+### 4. Sync your viberelay profile onto the box
+
+This fork runs Claude through `viberelay run -d vibe -- ...`, so the box needs your working viberelay account state.
+
+From a machine where `viberelay` already works for you, sync it onto the box:
+
+```bash
+viberelay sync bux@your-box
+```
+
+Then verify on the box:
+
+```bash
+ssh bux@your-box
+viberelay accounts
+viberelay run -d vibe -- --version
+```
+
+If you do not already use viberelay locally, set that up first on your laptop, then rerun the sync command.
+
+### 5. First run
 
 ```bash
 sudo -iu bux        # become the bux user
-cd ~ && claude
+cd ~ && viberelay run -d vibe --
 ```
 
-On first launch claude will ask you to log in. Type `/login` and complete the OAuth flow in your laptop browser. Once authed, exit claude (`/exit`). From now on `claude` starts straight into a session.
+On first launch the wrapped Claude session should start under the `vibe` profile. If you synced successfully, it should already have working account access.
 
-### 5. Bind the Telegram bot
+### 6. Bind the Telegram bot
 
 If you passed `TG_BOT_TOKEN`, the installer printed a `t.me/<bot>` URL. Open it on your phone, send any message ("hi" works). **The first chat wins** — after you bind, the bot ignores everyone else forever.
 

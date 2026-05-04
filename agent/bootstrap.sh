@@ -72,6 +72,35 @@ if [ -d "$HARNESS_DIR/.git" ]; then
   fi
 fi
 
+# --- viberelay (Claude wrapper / local proxy profile runner) ---------------
+# Existing bux boxes update via bootstrap.sh, not install.sh, so keep the
+# viberelay runtime present here too before we roll new systemd units.
+loginctl enable-linger bux >/dev/null 2>&1 || true
+if ! sudo -iu bux test -x /home/bux/.local/bin/viberelay; then
+  echo "bootstrap: installing viberelay"
+  sudo -iu bux env VIBERELAY_AUTO_SERVICE=1 bash -lc \
+    'curl -fsSL https://github.com/vibeproxy/viberelay/releases/latest/download/install.sh | bash'
+fi
+install -d -o bux -g bux -m 0755 /home/bux/.viberelay/profiles
+if [ ! -f /home/bux/.viberelay/profiles/vibe.json ]; then
+  cat > /home/bux/.viberelay/profiles/vibe.json <<'JSON'
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8327",
+    "ANTHROPIC_AUTH_TOKEN": "viberelay-local",
+    "ANTHROPIC_MODEL": "high[1m]",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "high[1m]",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "mid[1m]",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "low[1m]",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "low[1m]"
+  }
+}
+JSON
+  chown bux:bux /home/bux/.viberelay/profiles/vibe.json
+  chmod 0644 /home/bux/.viberelay/profiles/vibe.json
+fi
+sudo -iu bux /home/bux/.local/bin/viberelay start >/dev/null 2>&1 || true
+
 # --- Cloud Composio MCP server (cloud-side proxy) -------------------------
 # Why MCP at all: cloud holds the platform's Composio API key plus every
 # integration the user OAuth'd via cloud.browser-use.com. Rather than

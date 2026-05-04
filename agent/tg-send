@@ -1,22 +1,17 @@
 #!/usr/bin/env bash
-# tg-send "your message here"        # arg form
-# echo "msg" | tg-send                # stdin form (for piping output)
-# claude -p "..." | tg-send           # the recurring use case
+# tg-send "your message here"                    # arg form
+# echo "msg" | tg-send                            # stdin form (for piping output)
+# viberelay run -d vibe -- -p "..." | tg-send     # recurring text result
+# tg-send --file /tmp/shot.png --caption "done"   # media / attachment
 #
 # Forum-topic routing (set in env by the bot before invoking the agent):
 #   TG_CHAT_ID    — chat to post into (default: first line of tg-allowed.txt)
-#   TG_THREAD_ID  — message_thread_id, so a backgrounded `claude -p ... | tg-send &`
-#                   pings back into the same forum topic the user asked from
+#   TG_THREAD_ID  — message_thread_id, so a backgrounded worker pings back
+#                   into the same forum topic the user asked from
 #   TG_REPLY_TO   — optional reply_to_message_id
 #   TG_LINK_PREVIEW=1 — opt back in to TG link previews (default: suppressed)
 set -euo pipefail
-if [ "$#" -ge 1 ]; then
-  text="$*"
-else
-  text="$(cat)"
-fi
-text="${text%$'\n'}"
-[ -n "$text" ] || { echo "tg-send: empty payload (no args, no stdin)" >&2; exit 2; }
+
 env_file=/etc/bux/tg.env
 allow_file=/etc/bux/tg-allowed.txt
 [ -r "$env_file" ] || { echo "tg-send: cannot read $env_file" >&2; exit 1; }
@@ -24,6 +19,58 @@ allow_file=/etc/bux/tg-allowed.txt
 # shellcheck disable=SC1090
 . "$env_file"
 [ -n "${TG_BOT_TOKEN:-}" ] || { echo "tg-send: TG_BOT_TOKEN missing" >&2; exit 1; }
+
+files=()
+caption=""
+force_method=""
+text_parts=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --file)
+      [ "$#" -ge 2 ] || { echo "tg-send: --file needs a path" >&2; exit 2; }
+      files+=("$2")
+      shift 2
+      ;;
+    --caption)
+      [ "$#" -ge 2 ] || { echo "tg-send: --caption needs text" >&2; exit 2; }
+      caption="$2"
+      shift 2
+      ;;
+    --as-photo)
+      force_method="sendPhoto"
+      shift
+      ;;
+    --as-document)
+      force_method="sendDocument"
+      shift
+      ;;
+    --)
+      shift
+      while [ "$#" -gt 0 ]; do
+        text_parts+=("$1")
+        shift
+      done
+      ;;
+    *)
+      text_parts+=("$1")
+      shift
+      ;;
+  esac
+done
+
+stdin_payload=""
+if [ ! -t 0 ]; then
+  stdin_payload="$(cat)"
+  stdin_payload="${stdin_payload%$'\n'}"
+fi
+
+text="${text_parts[*]:-}"
+if [ -z "$caption" ] && [ ${#files[@]} -gt 0 ] && [ -n "$stdin_payload" ]; then
+  caption="$stdin_payload"
+elif [ -z "$text" ] && [ -n "$stdin_payload" ]; then
+  text="$stdin_payload"
+fi
+
 # Prefer TG_CHAT_ID (per-lane routing exported by the bot); fall back to
 # the first allowed chat. The file is one-id-per-line; we currently bind
 # only one chat anyway.
@@ -33,32 +80,97 @@ else
   chat_id=$(awk 'NF{print; exit}' "$allow_file")
 fi
 [ -n "$chat_id" ] || { echo "tg-send: empty $allow_file" >&2; exit 1; }
-# TG caps sendMessage at 4096 chars; truncate with marker so a long
-# claude -p output doesn't 400 silently.
-if [ "${#text}" -gt 4000 ]; then
-  text="${text:0:3950}…(truncated)"
+
+send_text() {
+  local payload_text="$1"
+  [ -n "$payload_text" ] || { echo "tg-send: empty payload (no args, no stdin)" >&2; exit 2; }
+  if [ "${#payload_text}" -gt 4000 ]; then
+    payload_text="${payload_text:0:3950}…(truncated)"
+  fi
+  local preview_disabled=true
+  if [ "${TG_LINK_PREVIEW:-}" = "1" ]; then
+    preview_disabled=false
+  fi
+  local jq_filter jq_args
+  jq_filter='{chat_id: ($c|tonumber), text: $t, link_preview_options: {is_disabled: ($lp == "true")}}'
+  jq_args=(--arg c "$chat_id" --arg t "$payload_text" --arg lp "$preview_disabled")
+  if [ -n "${TG_THREAD_ID:-}" ]; then
+    jq_filter="${jq_filter} + {message_thread_id: (\$tid|tonumber)}"
+    jq_args+=(--arg tid "$TG_THREAD_ID")
+  fi
+  if [ -n "${TG_REPLY_TO:-}" ]; then
+    jq_filter="${jq_filter} + {reply_to_message_id: (\$rid|tonumber)}"
+    jq_args+=(--arg rid "$TG_REPLY_TO")
+  fi
+  curl -fsS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+    --max-time 15 \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -nc "${jq_args[@]}" "$jq_filter")" \
+    > /dev/null
+}
+
+media_method_for() {
+  local path="$1"
+  if [ -n "$force_method" ]; then
+    printf '%s\n' "$force_method"
+    return
+  fi
+  local mime
+  mime=$(file -Lb --mime-type -- "$path" 2>/dev/null || true)
+  case "$mime" in
+    image/*)
+      printf 'sendPhoto\n'
+      ;;
+    *)
+      printf 'sendDocument\n'
+      ;;
+  esac
+}
+
+send_file() {
+  local path="$1"
+  local method field cap
+  [ -f "$path" ] || { echo "tg-send: file not found: $path" >&2; exit 1; }
+  method=$(media_method_for "$path")
+  field="document"
+  [ "$method" = "sendPhoto" ] && field="photo"
+  cap="$2"
+  if [ "${#cap}" -gt 1000 ]; then
+    cap="${cap:0:980}…(truncated)"
+  fi
+  local curl_args
+  curl_args=(
+    -fsS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/${method}"
+    --max-time 60
+    -F "chat_id=${chat_id}"
+    -F "${field}=@${path}"
+  )
+  if [ -n "$cap" ]; then
+    curl_args+=( -F "caption=${cap}" )
+  fi
+  if [ -n "${TG_THREAD_ID:-}" ]; then
+    curl_args+=( -F "message_thread_id=${TG_THREAD_ID}" )
+  fi
+  if [ -n "${TG_REPLY_TO:-}" ]; then
+    curl_args+=( -F "reply_to_message_id=${TG_REPLY_TO}" )
+  fi
+  curl "${curl_args[@]}" > /dev/null
+}
+
+if [ ${#files[@]} -gt 0 ]; then
+  first=1
+  for path in "${files[@]}"; do
+    file_caption=""
+    if [ "$first" -eq 1 ]; then
+      file_caption="$caption"
+      first=0
+    fi
+    send_file "$path" "$file_caption"
+  done
+  if [ -n "$text" ]; then
+    send_text "$text"
+  fi
+  exit 0
 fi
-# Build payload, optionally injecting message_thread_id and reply_to_message_id.
-# Numeric coercion in jq → bad values 400 here instead of confusing TG.
-# Suppress link previews by default — same reason as the bot itself
-# (preview cards eat phone-screen real estate). Callers that want a
-# preview can `TG_LINK_PREVIEW=1 tg-send …`.
-preview_disabled=true
-if [ "${TG_LINK_PREVIEW:-}" = "1" ]; then
-  preview_disabled=false
-fi
-jq_filter='{chat_id: ($c|tonumber), text: $t, link_preview_options: {is_disabled: ($lp == "true")}}'
-jq_args=(--arg c "$chat_id" --arg t "$text" --arg lp "$preview_disabled")
-if [ -n "${TG_THREAD_ID:-}" ]; then
-  jq_filter="${jq_filter} + {message_thread_id: (\$tid|tonumber)}"
-  jq_args+=(--arg tid "$TG_THREAD_ID")
-fi
-if [ -n "${TG_REPLY_TO:-}" ]; then
-  jq_filter="${jq_filter} + {reply_to_message_id: (\$rid|tonumber)}"
-  jq_args+=(--arg rid "$TG_REPLY_TO")
-fi
-curl -fsS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-  --max-time 15 \
-  -H 'Content-Type: application/json' \
-  -d "$(jq -nc "${jq_args[@]}" "$jq_filter")" \
-  > /dev/null
+
+send_text "$text"
